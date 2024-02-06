@@ -2,7 +2,7 @@
 
 ## Part 1
 
-### Throught Process & Approach
+### Thought Process & Approach
 
 Took some time to revise on the various server push mechanisms. Two that immediately came to mind are websockets and server-sent events. Websocket is used to implement the requirements given the unfamiliarity with SSE and time available.
 
@@ -20,7 +20,7 @@ Tests are omitted at this point.
 
 ## Part 2
 
-### Throught Process & Approach
+### Thought Process & Approach
 
 The major challenge for part 2 is that for websocket, once connection is closed by client, the client cannot re-establish the connection. I.e UserA opens a connection in browser, user refreshed browser and connection is lost, UserA re-opens a connection, the connection will be a new connection without context of the previous connection.
 
@@ -35,7 +35,7 @@ The implementation makes use of the server push step, where if there is an error
 
 ## Part 3
 
-### Throught Process & Approach
+### Thought Process & Approach
 
 The implementation introduces a new query param expecting the value to be a comma-seperated list of currencies the client wants to receive the price in.
 
@@ -44,10 +44,40 @@ The implementation introduces a new query param expecting the value to be a comm
 
 ## Part 4
 
-### Throught Process & Approach
+### Thought Process & Approach
 
 - To do horizontal scaling, we would deploy multiple instances behind a load-balancer
 - The current way of aggregating data will not work as the data is store in-memory within a single server instance. If client reconnects to a different server instance, no aggregated data will be available.
 - To resolve, the service will need a storage accessible by all server instances. Since the data is short-lived and periodically purged, Redis would be a good choice for fast retrivals and TTLs.
 
 Code could be refactored for better maintainability and testibility. Some unit tests are written here.
+
+## Part 5
+
+### Thought Process & Approach
+
+#### Architectural
+
+The current implementation starts up a process with 5-second work intervals for ALL clients. There will be a lot of duplicate processings, eg. UserA and UserB both made connections at T1. Both get same update at T+5s, T+10s, etc. The data fetch from Coindesk and processing ideally should just happen once and pushed to both UserA and UserB.
+
+This suggests that the data fetching and processing could be a scheduled system task instead and the results persisted into storage. Storing into DB allows for the building of price history, and allows for better capabilities to aggregate and send missed updates to clients.
+
+The updates to the client also do not need to be a fixed `x` second interval. The process can be optmised by only sending updates to clients when the newly fetched price differs from last known price. This can be acheived by adopting a more event-driven approach with pub/sub:
+
+- Scheduled system task executes and fetches latest price from source
+- Persist into storage, get `lastKnownPrice` from Redis
+- If differs from price from fetched data, update `lastKnownPrice` cache value, publish a new message
+- Each active websocket connection within the server will be initialised as a subscriber to the pub/sub topic 
+- When messages are received by the subscribers, server push updates to clients
+
+#### Resiliency
+
+- The API call to the source to retrive price data is prone to failure, a retry policy should be defined
+- Currently there is only one single source, in an event Coindesk went down, the service will be down as well with incomplete record
+- Have more than one source 
+- Since the endpoint is available to public, it will be proned to DDoS. As such, a rate-limiting mechanism could be used on the endpoint
+
+#### Availability
+
+- To handle legitimate traffic spikes, the load-balancer will need to be able to perform auto-scaling
+- Rate limit the APIs to prevent exceeding
