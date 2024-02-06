@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"price-service/external/coindesk"
+	"strconv"
 	"text/template"
 	"time"
 
@@ -15,7 +16,8 @@ import (
 // using reference code from https://github.com/gorilla/websocket/blob/main/examples/echo/server.go
 
 const (
-	httpAddr = "localhost:8080"
+	httpAddr                    = "localhost:8080"
+	purgeClientDataOnErrTimeout = 1 * time.Minute // max duration of data bufferring while client loses connection
 
 	// could do json marshal to bytes, we use sprintf for simplicity for now
 	// also assuming format to be json since it is not specified
@@ -23,8 +25,19 @@ const (
 )
 
 var (
-	upgrader = websocket.Upgrader{}
+	upgrader        = websocket.Upgrader{}
+	wsClientDataMap = map[string]*wsClientData{}
 )
+
+type wsClientData struct {
+	replyBuffer []*replyData
+	expiry      *time.Time
+}
+
+type replyData struct {
+	text      string
+	timestamp *time.Time
+}
 
 func main() {
 	// Setup required deps
@@ -40,6 +53,25 @@ func home(w http.ResponseWriter, r *http.Request) {
 }
 
 func pricefeed(w http.ResponseWriter, r *http.Request) {
+	queryParams := r.URL.Query()
+	clientID := queryParams.Get("client_id")
+	startTimedateParam := queryParams.Get("start_timedate")
+
+	if clientID == "" {
+		log.Println("clientID not specified")
+		return
+	}
+
+	// Websocket connection can be lost and unable to be reconnected by clients at any time,
+	// thus use the clientID as map key to aggregate data that should be sent to the client
+	// when new connection is established
+	clientData, exists := wsClientDataMap[clientID]
+	if !exists {
+		clientData = &wsClientData{}
+		wsClientDataMap[clientID] = clientData
+	}
+
+	// Upgrade HTTP connection to websocket
 	c, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Print("upgrade:", err)
@@ -49,23 +81,77 @@ func pricefeed(w http.ResponseWriter, r *http.Request) {
 
 	coindeskClient := coindesk.GetClient()
 
+	// Fetch data and send to client every x seconds
 	for range time.Tick(5 * time.Second) {
+		// check if client data expired, purge if true,
+		// also breaks the loop so that connection can be closed at server side
+		if clientData.expiry != nil && time.Now().After(*clientData.expiry) {
+			delete(wsClientDataMap, clientID)
+			log.Println("connection expired, purge data")
+			break
+		}
+
 		resp, err := coindeskClient.CurrentPrice("BTC")
 		if err != nil {
-			log.Println("write:", err)
-			break
+			log.Println("failed to get current price:", err)
+			continue
 		}
+
+		feedTimestamp := time.Now()
 
 		// not too sure if timedate refers to time of last price update represented by resp.Time.Updated,
-		// or simply the timestamp of price update reply to client,
-		// using the latter as it makes more sense
-		reply := fmt.Sprintf(priceFeedFormat, time.Now().UTC(), resp.BPI["USD"].RateFloat)
+		// or simply the timestamp of price update reply to client, here, we use the latter
+		reply := fmt.Sprintf(priceFeedFormat, feedTimestamp.UTC(), resp.BPI["USD"].RateFloat)
 
-		err = c.WriteMessage(1, []byte(reply))
-		if err != nil {
-			log.Println("write:", err)
-			break
+		message := ""
+		replyBuffer := clientData.replyBuffer
+
+		// if start timedate is specified, retrieve only entries on or after in reply buffer,
+		// since format is not specified, will go with the assumption that query param will be in unix time format
+		if startTimedateParam != "" {
+			i, err := strconv.ParseInt(startTimedateParam, 10, 64)
+			if err != nil {
+				log.Print("parse startTimedate:", err)
+				continue
+			}
+
+			startTimedate := time.Unix(i, 0)
+			startIdx := 0
+
+			for i, r := range replyBuffer {
+				if startTimedate.Equal(*r.timestamp) || startTimedate.Before(*r.timestamp) {
+					startIdx = i
+					break
+				}
+			}
+
+			replyBuffer = replyBuffer[startIdx:]
 		}
+
+		// aggregate replies while client is offline and reply in a single message
+		for _, r := range replyBuffer {
+			message += r.text + "\n"
+		}
+
+		message += reply
+
+		err = c.WriteMessage(1, []byte(message))
+		if err != nil {
+			clientData.replyBuffer = append(clientData.replyBuffer, &replyData{text: reply, timestamp: &feedTimestamp})
+
+			// set expiry upon first detection of client went offline
+			if clientData.expiry == nil {
+				exp := time.Now().Add(purgeClientDataOnErrTimeout)
+				clientData.expiry = &exp
+			}
+
+			log.Println("write:", err)
+			continue
+		}
+
+		// reset client data if connection restore and msg sent successfully
+		clientData.replyBuffer = nil
+		clientData.expiry = nil
 	}
 }
 
@@ -92,7 +178,7 @@ window.addEventListener("load", function(evt) {
         if (ws) {
             return false;
         }
-        ws = new WebSocket("{{.}}");
+        ws = new WebSocket("ws://localhost:8080/pricefeed?client_id=1");
         ws.onopen = function(evt) {
             print("OPEN");
         }
