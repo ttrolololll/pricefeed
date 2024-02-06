@@ -41,3 +41,13 @@ The implementation introduces a new query param expecting the value to be a comm
 
 ### Usage
 1. Modify currencies param in `ws://localhost:8080/pricefeed?client_id=1&currencies=USD,EUR` in `main.go` and execute
+
+## Part 4
+
+### Throught Process & Approach
+
+- To do horizontal scaling, we would deploy multiple instances behind a load-balancer
+- The current way of aggregating data will not work as the data is store in-memory within a single server instance. If client reconnects to a different server instance, no aggregated data will be available.
+- To resolve, the service will need a storage accessible by all server instances. Since the data is short-lived and periodically purged, Redis would be a good choice for fast retrivals and TTLs.
+
+Code could be refactored for better maintainability and testibility. Some unit tests are written here.
