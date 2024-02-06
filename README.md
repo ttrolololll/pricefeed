@@ -37,3 +37,7 @@ The implementation makes use of the server push step, where if there is an error
 
 ### Throught Process & Approach
 
+The implementation introduces a new query param expecting the value to be a comma-seperated list of currencies the client wants to receive the price in.
+
+### Usage
+1. Modify currencies param in `ws://localhost:8080/pricefeed?client_id=1&currencies=USD,EUR` in `main.go` and execute

@@ -1,11 +1,12 @@
 package main
 
 import (
-	"fmt"
+	"encoding/json"
 	"log"
 	"net/http"
 	"price-service/external/coindesk"
 	"strconv"
+	"strings"
 	"text/template"
 	"time"
 
@@ -28,6 +29,12 @@ var (
 	upgrader        = websocket.Upgrader{}
 	wsClientDataMap = map[string]*wsClientData{}
 )
+
+type PriceFeed struct {
+	Timedate string  `json:"timedate"`
+	PriceUSD float64 `json:"price_usd,omitempty"`
+	PriceEUR float64 `json:"price_eur,omitempty"`
+}
 
 type wsClientData struct {
 	replyBuffer []*replyData
@@ -56,6 +63,18 @@ func pricefeed(w http.ResponseWriter, r *http.Request) {
 	queryParams := r.URL.Query()
 	clientID := queryParams.Get("client_id")
 	startTimedateParam := queryParams.Get("start_timedate")
+	currenciesParam := queryParams.Get("currencies")
+
+	currencies := strings.Split(currenciesParam, ",")
+	currenciesMap := map[string]struct{}{}
+
+	if currenciesParam == "" || len(currencies) == 0 {
+		currenciesMap["USD"] = struct{}{}
+	}
+
+	for _, c := range currencies {
+		currenciesMap[strings.ToUpper(c)] = struct{}{}
+	}
 
 	if clientID == "" {
 		log.Println("clientID not specified")
@@ -99,9 +118,26 @@ func pricefeed(w http.ResponseWriter, r *http.Request) {
 
 		feedTimestamp := time.Now()
 
+		feed := &PriceFeed{
+			Timedate: feedTimestamp.UTC().String(),
+		}
+
+		if _, exists := currenciesMap["USD"]; exists {
+			feed.PriceUSD = resp.BPI["USD"].RateFloat
+		}
+		if _, exists := currenciesMap["EUR"]; exists {
+			feed.PriceEUR = resp.BPI["EUR"].RateFloat
+		}
+
+		replyRaw, err := json.Marshal(feed)
+		if err != nil {
+			log.Println("failed to marshal feed data:", err)
+			continue
+		}
+
 		// not too sure if timedate refers to time of last price update represented by resp.Time.Updated,
 		// or simply the timestamp of price update reply to client, here, we use the latter
-		reply := fmt.Sprintf(priceFeedFormat, feedTimestamp.UTC(), resp.BPI["USD"].RateFloat)
+		reply := string(replyRaw)
 
 		message := ""
 		replyBuffer := clientData.replyBuffer
@@ -178,7 +214,7 @@ window.addEventListener("load", function(evt) {
         if (ws) {
             return false;
         }
-        ws = new WebSocket("ws://localhost:8080/pricefeed?client_id=1");
+        ws = new WebSocket("ws://localhost:8080/pricefeed?client_id=1&currencies=USD,EUR");
         ws.onopen = function(evt) {
             print("OPEN");
         }
